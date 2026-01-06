@@ -38,6 +38,14 @@ func ErrorHandlerMiddlewareGin() gin.HandlerFunc {
 		err := c.Errors.Last().Err
 
 		// ===== Custom Errors =====
+		if errors.Is(err, ErrEmailAlreadyExists) {
+			c.AbortWithStatusJSON(
+				http.StatusBadRequest,
+				ErrorResponse(http.StatusNotFound, err.Error()),
+			)
+			return
+		}
+
 		if errors.Is(err, ErrNotFound) {
 			c.AbortWithStatusJSON(
 				http.StatusNotFound,

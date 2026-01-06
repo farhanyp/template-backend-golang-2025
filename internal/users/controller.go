@@ -15,11 +15,10 @@ type IExampleController interface {
 }
 
 type exampleController struct {
-	service IExampleService
 }
 
-func NewExampleController(service IExampleService) IExampleController {
-	return &exampleController{service: service}
+func NewExampleController() IExampleController {
+	return &exampleController{}
 }
 
 func (c *exampleController) RegisterRoutes(r *gin.RouterGroup) {
@@ -30,7 +29,6 @@ func (c *exampleController) RegisterRoutes(r *gin.RouterGroup) {
 func (c *exampleController) HelloWorld(ctx *gin.Context) {
 	var req dto.HelloWorldRequest
 
-	// Bind JSON body
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
@@ -38,7 +36,6 @@ func (c *exampleController) HelloWorld(ctx *gin.Context) {
 		return
 	}
 
-	// Validation
 	if err := serverutils.ValidateRequest(req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
@@ -47,12 +44,11 @@ func (c *exampleController) HelloWorld(ctx *gin.Context) {
 	}
 
 	// Call service (IMPORTANT PART)
-	res, err := c.service.HelloWorld(ctx.Request.Context(), &req)
-	if err != nil {
-		// lempar ke global error handler gin
-		ctx.Error(err)
-		return
-	}
+	// res, err := c.service.HelloWorld(ctx.Request.Context(), &req)
+	// if err != nil {
+	// 	ctx.Error(err)
+	// 	return
+	// }
 
-	ctx.JSON(http.StatusOK, serverutils.SuccessResponse("Success", res))
+	ctx.JSON(http.StatusOK, serverutils.SuccessResponse("Success", ""))
 }

@@ -1,4 +1,4 @@
-package example
+package auth
 
 import (
 	"context"
@@ -20,7 +20,7 @@ type usersRepository struct {
 	db database.DatabaseQueryer
 }
 
-func NewExampleRepository(db *pgxpool.Pool) IUsersRepository {
+func NewUserRepository(db *pgxpool.Pool) IUsersRepository {
 	return &usersRepository{
 		db: db,
 	}
@@ -34,8 +34,8 @@ func (r *usersRepository) UsingTx(ctx context.Context, tx database.DatabaseQuery
 
 func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) error {
 	query := `
-        INSERT INTO users (id, name, password, is_active, email_verified_at, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (id, name, email, password, is_active, email_verified_at, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `
 
 	Tag, err := r.db.Exec(
@@ -43,6 +43,7 @@ func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) er
 		query,
 		user.Id,
 		user.Name,
+		user.Email,
 		user.Password,
 		user.IsActive,
 		user.EmailVerifiedAt,
@@ -63,12 +64,11 @@ func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) er
 
 func (r *usersRepository) FindUserByEmail(ctx context.Context, email string) (*entity.Users, error) {
 	query := `
-        SELECT name, email, FROM users  WHERE email = $1
+        SELECT name, email FROM users  WHERE email = $1
     `
 
 	var user entity.Users
 	err := r.db.QueryRow(ctx, query, email).Scan(
-		&user.Id,
 		&user.Name,
 		&user.Email,
 	)

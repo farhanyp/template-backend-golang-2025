@@ -2,36 +2,48 @@ package example
 
 import (
 	"context"
-	"fmt"
+	"time"
 
 	"template-golang-2025/internal/dto"
+	"template-golang-2025/internal/entity"
+
+	"github.com/google/uuid"
 )
 
-type IExampleService interface {
-	HelloWorld(ctx context.Context, req *dto.HelloWorldRequest) (*dto.HelloWorldResponse, error)
+type IAuthService interface {
+	Register(ctx context.Context, req *dto.RegisterRequest) (*dto.RegisterResponse, error)
 }
 
-type exampleService struct {
-	exampleRepository IExampleRepository
+type authService struct {
+	usersRepository IUsersRepository
 }
 
-func NewExampleService(exampleRepository IExampleRepository) IExampleService {
-	return &exampleService{
-		exampleRepository: exampleRepository,
-	}
+func NewAuthService(usersRepository IUsersRepository) IAuthService {
+	return &authService{usersRepository: usersRepository}
 }
 
-func (s *exampleService) HelloWorld(
-	ctx context.Context,
-	req *dto.HelloWorldRequest,
-) (*dto.HelloWorldResponse, error) {
+func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*dto.RegisterResponse, error) {
 
-	_, err := s.exampleRepository.Ping(ctx)
+	userExist, err := s.usersRepository.FindUserByEmail(ctx, req.Email)
 	if err != nil {
 		return nil, err
 	}
 
-	return &dto.HelloWorldResponse{
-		Message: fmt.Sprintf("Hello %s", req.Name),
-	}, nil
+	user := &entity.Users{
+		Id:              uuid.New(),
+		Name:            req.Name,
+		Email:           userExist.Email,
+		Password:        "",
+		IsActive:        false,
+		EmailVerifiedAt: nil,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       nil,
+	}
+
+	err = s.usersRepository.CreateUser(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, nil
 }

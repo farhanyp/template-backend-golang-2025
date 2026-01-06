@@ -4,9 +4,11 @@ import (
 	"log"
 	"os"
 
+	"template-golang-2025/internal/auth"
 	"template-golang-2025/internal/example"
 	"template-golang-2025/internal/pkg/serverutils"
 	"template-golang-2025/pkg/database"
+	"template-golang-2025/pkg/jwt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -32,19 +34,26 @@ func main() {
 
 	// ===== Watermill (Pub/Sub) =====
 
+	// ===== JWT =====
+	userIdentity := jwt.NewJWTService(os.Getenv("JWT-SECRET"), os.Getenv("JWT-ISSUER"))
+
 	// ===== Repository =====
 	exampleRepository := example.NewExampleRepository(db)
+	userRepository := auth.NewUserRepository(db)
 
 	// ===== Service =====
 	exampleService := example.NewExampleService(exampleRepository)
+	authService := auth.NewAuthService(userRepository, userIdentity)
 
 	// ===== Controller =====
 	exampleController := example.NewExampleController(exampleService)
+	authController := auth.NewAuthController(authService)
 
 	// ===== Routes =====
 	api := router.Group("/api")
 	{
 		exampleController.RegisterRoutes(api)
+		authController.RegisterRoutes(api)
 	}
 
 	// ===== Start Server =====

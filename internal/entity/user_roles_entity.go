@@ -1,4 +1,4 @@
-package example
+package entity
 
 import (
 	"time"
@@ -6,12 +6,10 @@ import (
 	"github.com/google/uuid"
 )
 
-type Users struct {
+type UserRoles struct {
 	Id        uuid.UUID
-	Name      string
-	Email     string
-	Password  string
-	is_active bool
+	UserId    uuid.UUID
+	RoleId    uuid.UUID
 	CreatedAt time.Time
 	UpdatedAt *time.Time
 }
