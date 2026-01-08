@@ -38,10 +38,18 @@ func ErrorHandlerMiddlewareGin() gin.HandlerFunc {
 		err := c.Errors.Last().Err
 
 		// ===== Custom Errors =====
+		if errors.Is(err, ErrInvalidCredentials) {
+			c.AbortWithStatusJSON(
+				http.StatusUnauthorized,
+				ErrorResponse(http.StatusUnauthorized, err.Error()),
+			)
+			return
+		}
+
 		if errors.Is(err, ErrEmailAlreadyExists) {
 			c.AbortWithStatusJSON(
 				http.StatusBadRequest,
-				ErrorResponse(http.StatusNotFound, err.Error()),
+				ErrorResponse(http.StatusBadRequest, err.Error()),
 			)
 			return
 		}

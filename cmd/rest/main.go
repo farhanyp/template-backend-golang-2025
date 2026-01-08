@@ -7,6 +7,7 @@ import (
 	"template-golang-2025/internal/auth"
 	"template-golang-2025/internal/example"
 	"template-golang-2025/internal/pkg/serverutils"
+	user "template-golang-2025/internal/users"
 	"template-golang-2025/pkg/database"
 	"template-golang-2025/pkg/jwt"
 
@@ -39,7 +40,7 @@ func main() {
 
 	// ===== Repository =====
 	exampleRepository := example.NewExampleRepository(db)
-	userRepository := auth.NewUserRepository(db)
+	userRepository := user.NewUserRepository(db)
 
 	// ===== Service =====
 	exampleService := example.NewExampleService(exampleRepository)

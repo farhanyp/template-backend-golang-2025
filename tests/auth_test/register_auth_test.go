@@ -46,7 +46,7 @@ func setupRouter(s auth.IAuthService) *gin.Engine {
 	return r
 }
 
-func TestAuthController_Register_Comprehensive(t *testing.T) {
+func TestAuthController_Register(t *testing.T) {
 
 	t.Run("1. Success Registration", func(t *testing.T) {
 		mockService := new(MockAuthService)

@@ -2,15 +2,19 @@ package dto
 
 import "github.com/google/uuid"
 
-type RegisterRequest struct {
-	Name     string `json:"name" validate:"required"`
-	Email    string `json:"email" validate:"required,email"`
-	Password string `json:"password" validate:"required"`
-}
+// Token
 
 type Token struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+// Register
+type RegisterRequest struct {
+	Name     string `json:"name" validate:"required"`
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
 }
 
 type UserIdentity struct {
@@ -20,6 +24,17 @@ type UserIdentity struct {
 }
 
 type RegisterResponse struct {
+	User  UserIdentity `json:"user"`
+	Token Token        `json:"token"`
+}
+
+// Login
+type LoginRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
+}
+
+type LoginResponse struct {
 	User  UserIdentity `json:"user"`
 	Token Token        `json:"token"`
 }

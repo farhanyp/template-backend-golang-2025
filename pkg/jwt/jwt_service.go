@@ -9,7 +9,7 @@ import (
 )
 
 type JWTService interface {
-	GenerateToken(userID uuid.UUID, tokenType string) (string, error)
+	GenerateToken(userID uuid.UUID, nameUser string, emailUser string, roles []string, permissions []string, tokenType string) (string, error)
 	ValidateToken(tokenString string) (*jwt.Token, error)
 }
 
@@ -22,8 +22,12 @@ type jwtService struct {
 
 // Custom Claims
 type JWTCustomClaims struct {
-	UserID uuid.UUID `json:"user_id"`
-	Type   string    `json:"type"` // "access" atau "refresh"
+	UserID     uuid.UUID `json:"user_id"`
+	Name       string
+	Email      string
+	Role       []string
+	Permission []string
+	Type       string `json:"type"` // "access" atau "refresh"
 	jwt.RegisteredClaims
 }
 
@@ -36,15 +40,19 @@ func NewJWTService(secret, issuer string) JWTService {
 	}
 }
 
-func (s *jwtService) GenerateToken(userID uuid.UUID, tokenType string) (string, error) {
+func (s *jwtService) GenerateToken(userID uuid.UUID, nameUser string, emailUser string, roles []string, permissions []string, tokenType string) (string, error) {
 	expiry := s.accessExpiry
 	if tokenType == "refresh" {
 		expiry = s.refreshExpiry
 	}
 
 	claims := &JWTCustomClaims{
-		UserID: userID,
-		Type:   tokenType,
+		UserID:     userID,
+		Name:       nameUser,
+		Email:      emailUser,
+		Role:       roles,
+		Permission: permissions,
+		Type:       tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
 			Issuer:    s.issuer,

@@ -1,4 +1,4 @@
-package example
+package user
 
 import (
 	"context"
@@ -7,35 +7,37 @@ import (
 	"template-golang-2025/internal/entity"
 	"template-golang-2025/pkg/database"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type IUsersRepository interface {
-	UsingTx(ctx context.Context, tx database.DatabaseQueryer) IUsersRepository
+type IUserRepository interface {
+	UsingTx(ctx context.Context, tx database.DatabaseQueryer) IUserRepository
 	CreateUser(ctx context.Context, user *entity.Users) error
 	FindUserByEmail(ctx context.Context, email string) (*entity.Users, error)
+	GetUserRolesAndPermissions(ctx context.Context, userID uuid.UUID) ([]string, []string, error)
 }
 
-type usersRepository struct {
+type userRepository struct {
 	db database.DatabaseQueryer
 }
 
-func NewExampleRepository(db *pgxpool.Pool) IUsersRepository {
-	return &usersRepository{
+func NewUserRepository(db *pgxpool.Pool) IUserRepository {
+	return &userRepository{
 		db: db,
 	}
 }
 
-func (r *usersRepository) UsingTx(ctx context.Context, tx database.DatabaseQueryer) IUsersRepository {
-	return &usersRepository{
+func (r *userRepository) UsingTx(ctx context.Context, tx database.DatabaseQueryer) IUserRepository {
+	return &userRepository{
 		db: tx,
 	}
 }
 
-func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) error {
+func (r *userRepository) CreateUser(ctx context.Context, user *entity.Users) error {
 	query := `
-        INSERT INTO users (id, name, password, is_active, email_verified_at, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (id, name, password, is_verfied, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
     `
 
 	Tag, err := r.db.Exec(
@@ -44,8 +46,7 @@ func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) er
 		user.Id,
 		user.Name,
 		user.Password,
-		user.IsActive,
-		user.EmailVerifiedAt,
+		user.IsVerified,
 		user.CreatedAt,
 		user.UpdatedAt,
 	)
@@ -61,9 +62,12 @@ func (r *usersRepository) CreateUser(ctx context.Context, user *entity.Users) er
 	return nil
 }
 
-func (r *usersRepository) FindUserByEmail(ctx context.Context, email string) (*entity.Users, error) {
+func (r *userRepository) FindUserByEmail(ctx context.Context, email string) (*entity.Users, error) {
+	// Perbaikan: Tambahkan ID dan Password untuk kebutuhan Verifikasi Login
 	query := `
-        SELECT name, email, FROM users  WHERE email = $1
+        SELECT id, name, email, password, is_verified 
+        FROM users 
+        WHERE email = $1
     `
 
 	var user entity.Users
@@ -71,9 +75,12 @@ func (r *usersRepository) FindUserByEmail(ctx context.Context, email string) (*e
 		&user.Id,
 		&user.Name,
 		&user.Email,
+		&user.Password,
+		&user.IsVerified,
 	)
 
 	if err != nil {
+		// Menggunakan library pgx, error "no rows" biasanya pgx.ErrNoRows
 		if err.Error() == "no rows in result set" {
 			return nil, nil
 		}
@@ -81,4 +88,55 @@ func (r *usersRepository) FindUserByEmail(ctx context.Context, email string) (*e
 	}
 
 	return &user, nil
+}
+
+func (r *userRepository) GetUserRolesAndPermissions(ctx context.Context, userID uuid.UUID) ([]string, []string, error) {
+	// 1. Ambil Roles
+	roleQuery := `
+        SELECT r.name 
+        FROM roles r
+        JOIN user_roles ur ON r.id = ur.role_id
+        WHERE ur.user_id = $1
+    `
+
+	roleRows, err := r.db.Query(ctx, roleQuery, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer roleRows.Close()
+
+	var roles []string
+	for roleRows.Next() {
+		var roleName string
+		if err := roleRows.Scan(&roleName); err != nil {
+			return nil, nil, err
+		}
+		roles = append(roles, roleName)
+	}
+
+	// 2. Ambil Permissions (Distinct agar tidak duplikat)
+	permQuery := `
+        SELECT DISTINCT p.code
+        FROM permissions p
+        JOIN role_permissions rp ON p.id = rp.permission_id
+        JOIN user_roles ur ON rp.role_id = ur.role_id
+        WHERE ur.user_id = $1
+    `
+
+	permRows, err := r.db.Query(ctx, permQuery, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer permRows.Close()
+
+	var permissions []string
+	for permRows.Next() {
+		var permCode string
+		if err := permRows.Scan(&permCode); err != nil {
+			return nil, nil, err
+		}
+		permissions = append(permissions, permCode)
+	}
+
+	return roles, permissions, nil
 }
