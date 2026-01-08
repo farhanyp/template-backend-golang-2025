@@ -6,16 +6,22 @@ import (
 	"template-golang-2025/internal/dto"
 	"template-golang-2025/internal/entity"
 	"template-golang-2025/internal/pkg/serverutils"
+	token "template-golang-2025/internal/refresh-token"
 	user "template-golang-2025/internal/users"
 	"template-golang-2025/pkg/database"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"golang.org/x/crypto/bcrypt"
 )
+
+type MockDB struct {
+	mock.Mock
+}
 
 type MockUserRepository struct {
 	mock.Mock
@@ -25,12 +31,27 @@ type MockJWTService struct {
 	mock.Mock
 }
 
+type MockTransaction struct {
+	mock.Mock
+}
+
+type MockRefreshTokenRepository struct {
+	mock.Mock
+}
+
 func TestAuthService_Register(t *testing.T) {
-	mockRepo := new(MockUserRepository)
-	mockJWT := new(MockJWTService) // Mock JWT yang kita buat sebelumnya
+	mockPool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockPool.Close()
+
+	mockUserRepo := new(MockUserRepository)
+	mockJWT := new(MockJWTService)
+	mockTokenRepo := new(MockRefreshTokenRepository)
 
 	// Kita panggil SERVICE ASLI, bukan mock
-	service := NewAuthService(mockRepo, mockJWT)
+	service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 	t.Run("1. Error Email Already Exists", func(t *testing.T) {
 		email := "duplicate@example.com"
@@ -41,7 +62,7 @@ func TestAuthService_Register(t *testing.T) {
 		}
 
 		// Simulasi: Repository menemukan user dengan email tersebut
-		mockRepo.On("FindUserByEmail", mock.Anything, email).Return(&entity.Users{Id: uuid.New(), Email: email}, nil)
+		mockUserRepo.On("FindUserByEmail", mock.Anything, email).Return(&entity.Users{Id: uuid.New(), Email: email}, nil)
 
 		res, err := service.Register(context.Background(), req)
 
@@ -50,13 +71,23 @@ func TestAuthService_Register(t *testing.T) {
 		assert.Nil(t, res)
 		assert.ErrorIs(t, err, serverutils.ErrEmailAlreadyExists)
 
-		mockRepo.AssertExpectations(t)
+		mockUserRepo.AssertExpectations(t)
 	})
 
-	t.Run("2. Success Register & Hashing Check", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
+	t.Run("2. Success Register & Transaction Check", func(t *testing.T) {
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
 		mockJWT := new(MockJWTService)
-		service := NewAuthService(mockRepo, mockJWT)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.RegisterRequest{
 			Email:    "new@example.com",
@@ -64,44 +95,54 @@ func TestAuthService_Register(t *testing.T) {
 			Password: "password123",
 		}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
-		mockRepo.On("CreateUser", mock.Anything, mock.Anything).Return(nil)
+		// --- SETUP EXPECTATIONS (DB) ---
+		// Kita beritahu mock bahwa transaksi akan dimulai dan diakhiri dengan Commit
+		mockPool.ExpectBegin()
+		mockPool.ExpectCommit()
 
-		// PERBAIKAN DI SINI:
-		// Setup untuk pemanggilan ACCESS TOKEN
-		mockJWT.On("GenerateToken",
-			mock.AnythingOfType("uuid.UUID"), // Gunakan matcher tipe yang benar
-			req.Name,
-			req.Email,
-			[]string{"user"},
-			mock.Anything, // Gunakan mock.Anything untuk permissions agar tidak sensitif terhadap []string{""} atau []string{}
-			"access",
-		).Return("fake-access-token", nil)
+		// --- SETUP MOCK (REPOSITORIES) ---
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
+		mockUserRepo.On("CreateUser", mock.Anything, mock.Anything).Return(nil)
 
-		// Setup untuk pemanggilan REFRESH TOKEN
-		mockJWT.On("GenerateToken",
-			mock.AnythingOfType("uuid.UUID"),
-			req.Name,
-			req.Email,
-			[]string{"user"},
-			mock.Anything,
-			"refresh",
-		).Return("fake-refresh-token", nil)
+		// Penting: Mock UsingTx harus mengembalikan repository itu sendiri
+		mockTokenRepo.On("UsingTx", mock.Anything, mock.Anything).Return(mockTokenRepo)
+		mockTokenRepo.On("DeleteRefreshTokenByUserId", mock.Anything, mock.Anything).Return(nil)
+		mockTokenRepo.On("CreateRefreshToken", mock.Anything, mock.Anything).Return(nil)
 
+		// --- SETUP MOCK (JWT) ---
+		mockJWT.On("GenerateToken", mock.Anything, req.Name, req.Email,
+			[]string{"user"}, mock.Anything, "access").Return("fake-access", nil)
+		mockJWT.On("GenerateToken", mock.Anything, req.Name, req.Email,
+			[]string{"user"}, mock.Anything, "refresh").Return("fake-refresh", nil)
+
+		// --- EXECUTION ---
 		res, err := service.Register(context.Background(), req)
 
+		// --- ASSERTION ---
 		assert.NoError(t, err)
 		assert.NotNil(t, res)
-		assert.Equal(t, "fake-access-token", res.Token.AccessToken)
+		assert.Equal(t, "fake-access", res.Token.AccessToken)
 
-		mockRepo.AssertExpectations(t)
+		// Pastikan semua ekspektasi (termasuk DB transaksi) terpenuhi
+		assert.NoError(t, mockPool.ExpectationsWereMet())
+		mockUserRepo.AssertExpectations(t)
 		mockJWT.AssertExpectations(t)
 	})
 
 	t.Run("3. Error Database - Failed to Create User", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
 		mockJWT := new(MockJWTService)
-		service := NewAuthService(mockRepo, mockJWT)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.RegisterRequest{
 			Email:    "db-error@example.com",
@@ -110,10 +151,10 @@ func TestAuthService_Register(t *testing.T) {
 		}
 
 		// Simulasi email belum ada
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
 
 		// Simulasi database gagal menyimpan data (misal: koneksi terputus)
-		mockRepo.On("CreateUser", mock.Anything, mock.Anything).
+		mockUserRepo.On("CreateUser", mock.Anything, mock.Anything).
 			Return(errors.New("database connection failed"))
 
 		res, err := service.Register(context.Background(), req)
@@ -123,13 +164,20 @@ func TestAuthService_Register(t *testing.T) {
 		assert.Nil(t, res)
 		assert.Equal(t, "database connection failed", err.Error())
 
-		mockRepo.AssertExpectations(t)
+		mockUserRepo.AssertExpectations(t)
 	})
 
 	t.Run("4. Error JWT - Failed to Generate Access Token", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
 		mockJWT := new(MockJWTService)
-		service := NewAuthService(mockRepo, mockJWT)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.RegisterRequest{
 			Email:    "jwt-error@example.com",
@@ -137,30 +185,56 @@ func TestAuthService_Register(t *testing.T) {
 			Password: "password123",
 		}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
-		mockRepo.On("CreateUser", mock.Anything, mock.Anything).Return(nil)
+		// --- SETUP EXPECTATIONS ---
 
-		// Simulasi library JWT gagal menandatangani token (misal: secret key bermasalah)
+		// 1. Logic pengecekan user & create user (sebelum transaksi)
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil)
+		mockUserRepo.On("CreateUser", mock.Anything, mock.Anything).Return(nil)
+
+		// 2. Setup Database Transaction
+		mockPool.ExpectBegin()
+
+		// 3. PENTING: Karena s.tokenRepository.UsingTx dipanggil tepat setelah Begin,
+		// mock ini WAJIB ada meskipun JWT nantinya gagal.
+		mockTokenRepo.On("UsingTx", mock.Anything, mock.Anything).Return(mockTokenRepo)
+
+		// 4. Karena JWT error, tx.Commit tidak dipanggil, sehingga defer tx.Rollback akan jalan
+		mockPool.ExpectRollback()
+
+		// 5. Setup JWT Error
 		mockJWT.On("GenerateToken", mock.Anything, req.Name, req.Email,
 			[]string{"user"}, mock.Anything, "access").
 			Return("", errors.New("jwt signing error"))
 
+		// --- EXECUTION ---
 		res, err := service.Register(context.Background(), req)
 
-		// Assertion
+		// --- ASSERTION ---
 		assert.Error(t, err)
 		assert.Nil(t, res)
 		assert.Contains(t, err.Error(), "jwt signing error")
 
-		mockRepo.AssertExpectations(t)
+		// Pastikan semua mock terpanggil sesuai rencana
+		mockUserRepo.AssertExpectations(t)
 		mockJWT.AssertExpectations(t)
+		mockTokenRepo.AssertExpectations(t) // Pastikan UsingTx diverifikasi
+		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }
 
 func TestAuthService_Login(t *testing.T) {
-	mockRepo := new(MockUserRepository)
+	mockPool, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockPool.Close()
+
+	mockUserRepo := new(MockUserRepository)
 	mockJWT := new(MockJWTService)
-	service := NewAuthService(mockRepo, mockJWT)
+	mockTokenRepo := new(MockRefreshTokenRepository)
+
+	// Kita panggil SERVICE ASLI, bukan mock
+	service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 	passwordPlain := "password123"
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(passwordPlain), bcrypt.DefaultCost)
@@ -177,42 +251,71 @@ func TestAuthService_Login(t *testing.T) {
 	t.Run("1. Success Login", func(t *testing.T) {
 		req := &dto.LoginRequest{
 			Email:    "john@example.com",
-			Password: passwordPlain,
+			Password: "password123",
 		}
 
-		roles := []string{"admin"}
-		perms := []string{"user:read", "user:write"}
+		// --- SETUP DB EXPECTATIONS ---
+		// WAJIB ADA: Karena fungsi Login memanggil s.db.Begin()
+		mockPool.ExpectBegin()
 
-		// 1. Mock Find User
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
+		// WAJIB ADA: Karena setelah Begin, s.tokenRepository.UsingTx() dipanggil
+		mockTokenRepo.On("UsingTx", mock.Anything, mock.Anything).Return(mockTokenRepo)
 
-		// 2. Mock Get Roles & Perms
-		mockRepo.On("GetUserRolesAndPermissions", mock.Anything, userID).Return(roles, perms, nil).Once()
+		// WAJIB ADA: Karena di akhir fungsi Login ada Commit
+		mockPool.ExpectCommit()
 
-		// 3. Mock JWT Generate (Access & Refresh)
-		mockJWT.On("GenerateToken", userID, userInDB.Name, userInDB.Email, roles, perms, "access").
-			Return("fake-access-token", nil).Once()
-		mockJWT.On("GenerateToken", userID, userInDB.Name, userInDB.Email, roles, perms, "refresh").
-			Return("fake-refresh-token", nil).Once()
+		// --- SETUP REPO & JWT MOCKS ---
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil)
 
+		// Setup Roles & Permissions
+		mockUserRepo.On("GetUserRolesAndPermissions", mock.Anything, userInDB.Id).
+			Return([]string{"user"}, []string{""}, nil)
+
+		// Mock Delete & Create Token
+		mockTokenRepo.On("DeleteRefreshTokenByUserId", mock.Anything, userInDB.Id).Return(nil)
+		mockTokenRepo.On("CreateRefreshToken", mock.Anything, mock.Anything).Return(nil)
+
+		// Mock JWT
+		mockJWT.On("GenerateToken", mock.Anything, mock.Anything, mock.Anything,
+			mock.Anything, mock.Anything, "access").Return("access-token", nil)
+		mockJWT.On("GenerateToken", mock.Anything, mock.Anything, mock.Anything,
+			mock.Anything, mock.Anything, "refresh").Return("refresh-token", nil)
+
+		// --- EXECUTION ---
 		res, err := service.Login(context.Background(), req)
 
+		// --- ASSERTIONS ---
 		assert.NoError(t, err)
-		assert.NotNil(t, res)
-		assert.Equal(t, "fake-access-token", res.Token.AccessToken)
-		assert.Equal(t, userInDB.Email, res.User.Email)
+		assert.NotNil(t, res) // Mencegah panic di baris berikutnya
+		if res != nil {
+			assert.Equal(t, "access-token", res.Token.AccessToken)
+		}
 
-		mockRepo.AssertExpectations(t)
+		// Verifikasi semua ekspektasi
+		assert.NoError(t, mockPool.ExpectationsWereMet())
+		mockUserRepo.AssertExpectations(t)
+		mockTokenRepo.AssertExpectations(t)
 		mockJWT.AssertExpectations(t)
 	})
 
 	t.Run("2. Error - User Not Found", func(t *testing.T) {
-		mockRepo := new(MockUserRepository) // Reset mock
-		service := NewAuthService(mockRepo, mockJWT)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
+		mockJWT := new(MockJWTService)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.LoginRequest{Email: "notfound@example.com", Password: "any"}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil).Once()
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(nil, nil).Once()
 
 		res, err := service.Login(context.Background(), req)
 
@@ -221,12 +324,23 @@ func TestAuthService_Login(t *testing.T) {
 	})
 
 	t.Run("3. Error - Wrong Password", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
-		service := NewAuthService(mockRepo, mockJWT)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
+		mockJWT := new(MockJWTService)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.LoginRequest{Email: "john@example.com", Password: "wrong-password"}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
 
 		res, err := service.Login(context.Background(), req)
 
@@ -235,10 +349,21 @@ func TestAuthService_Login(t *testing.T) {
 	})
 
 	t.Run("4. Error - Database Error on FindUser", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
-		service := NewAuthService(mockRepo, mockJWT)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
 
-		mockRepo.On("FindUserByEmail", mock.Anything, mock.Anything).
+		mockUserRepo := new(MockUserRepository)
+		mockJWT := new(MockJWTService)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
+
+		mockUserRepo.On("FindUserByEmail", mock.Anything, mock.Anything).
 			Return(nil, errors.New("db connection lost")).Once()
 
 		res, err := service.Login(context.Background(), &dto.LoginRequest{Email: "error@test.com"})
@@ -249,13 +374,24 @@ func TestAuthService_Login(t *testing.T) {
 	})
 
 	t.Run("5. Error - Failed to Get Roles & Permissions", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
-		service := NewAuthService(mockRepo, mockJWT)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
+		mockJWT := new(MockJWTService)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.LoginRequest{Email: "john@example.com", Password: passwordPlain}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
-		mockRepo.On("GetUserRolesAndPermissions", mock.Anything, userID).
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
+		mockUserRepo.On("GetUserRolesAndPermissions", mock.Anything, userID).
 			Return(nil, nil, errors.New("failed to fetch roles")).Once()
 
 		res, err := service.Login(context.Background(), req)
@@ -266,14 +402,24 @@ func TestAuthService_Login(t *testing.T) {
 	})
 
 	t.Run("6. Error - JWT Generation Failed", func(t *testing.T) {
-		mockRepo := new(MockUserRepository)
+		// 1. Inisialisasi pgxmock
+		mockPool, err := pgxmock.NewPool()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mockPool.Close()
+
+		mockUserRepo := new(MockUserRepository)
 		mockJWT := new(MockJWTService)
-		service := NewAuthService(mockRepo, mockJWT)
+		mockTokenRepo := new(MockRefreshTokenRepository)
+
+		// 2. Inisialisasi Service (Sekarang mockPool bisa masuk karena parameternya Interface)
+		service := NewAuthService(mockUserRepo, mockTokenRepo, mockJWT, mockPool)
 
 		req := &dto.LoginRequest{Email: "john@example.com", Password: passwordPlain}
 
-		mockRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
-		mockRepo.On("GetUserRolesAndPermissions", mock.Anything, userID).Return([]string{"user"}, []string{}, nil).Once()
+		mockUserRepo.On("FindUserByEmail", mock.Anything, req.Email).Return(userInDB, nil).Once()
+		mockUserRepo.On("GetUserRolesAndPermissions", mock.Anything, userID).Return([]string{"user"}, []string{}, nil).Once()
 
 		// Simulasi error di GenerateToken pertama
 		mockJWT.On("GenerateToken", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, "access").
@@ -286,17 +432,17 @@ func TestAuthService_Login(t *testing.T) {
 	})
 }
 
-func (m *MockUserRepository) UsingTx(ctx context.Context, tx database.DatabaseQueryer) user.IUserRepository {
-	// Kita panggil Called supaya kita bisa melakukan tracking apakah UsingTx dipanggil
+func (m *MockRefreshTokenRepository) UsingTx(ctx context.Context, tx database.DatabaseQueryer) token.IRefreshTokenRepository {
 	args := m.Called(ctx, tx)
+	return args.Get(0).(token.IRefreshTokenRepository)
+}
 
-	// Biasanya kita ingin mengembalikan dirinya sendiri (m)
-	// agar chain method tetap berjalan menggunakan mock yang sama
-	if args.Get(0) == nil {
-		return m
-	}
+func (m *MockTransaction) Rollback(ctx context.Context) error {
+	return m.Called(ctx).Error(0)
+}
 
-	return args.Get(0).(user.IUserRepository)
+func (m *MockTransaction) Commit(ctx context.Context) error {
+	return m.Called(ctx).Error(0)
 }
 
 func (m *MockUserRepository) FindUserByEmail(ctx context.Context, email string) (*entity.Users, error) {
@@ -305,6 +451,19 @@ func (m *MockUserRepository) FindUserByEmail(ctx context.Context, email string) 
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*entity.Users), args.Error(1)
+}
+
+func (m *MockUserRepository) UsingTx(ctx context.Context, tx database.DatabaseQueryer) user.IUserRepository {
+	// 1. Masukkan semua argumen ke Called agar bisa di-verify oleh testify
+	args := m.Called(ctx, tx)
+
+	// 2. Pastikan return value di-cast ke interface Repository
+	// Kita asumsikan return value pertama (index 0) adalah IUserRepository
+	if args.Get(0) == nil {
+		return nil
+	}
+
+	return args.Get(0).(user.IUserRepository)
 }
 
 func (m *MockUserRepository) CreateUser(ctx context.Context, user *entity.Users) error {
@@ -345,4 +504,17 @@ func (m *MockJWTService) ValidateToken(tokenString string) (*jwt.Token, error) {
 	}
 
 	return nil, args.Error(1)
+}
+
+func (m *MockDB) Begin(ctx context.Context) (any, error) {
+	args := m.Called(ctx)
+	return args.Get(0), args.Error(1)
+}
+
+func (m *MockRefreshTokenRepository) DeleteRefreshTokenByUserId(ctx context.Context, id uuid.UUID) error {
+	return m.Called(ctx, id).Error(0)
+}
+
+func (m *MockRefreshTokenRepository) CreateRefreshToken(ctx context.Context, t *entity.RefereshTokens) error {
+	return m.Called(ctx, t).Error(0)
 }

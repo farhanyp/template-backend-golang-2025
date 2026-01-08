@@ -13,5 +13,4 @@ type RefereshTokens struct {
 	ExpiredAt *time.Time
 	RevokedAt *time.Time
 	CreatedAt time.Time
-	UpdatedAt *time.Time
 }

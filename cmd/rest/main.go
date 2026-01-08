@@ -7,6 +7,7 @@ import (
 	"template-golang-2025/internal/auth"
 	"template-golang-2025/internal/example"
 	"template-golang-2025/internal/pkg/serverutils"
+	token "template-golang-2025/internal/refresh-token"
 	user "template-golang-2025/internal/users"
 	"template-golang-2025/pkg/database"
 	"template-golang-2025/pkg/jwt"
@@ -36,15 +37,16 @@ func main() {
 	// ===== Watermill (Pub/Sub) =====
 
 	// ===== JWT =====
-	userIdentity := jwt.NewJWTService(os.Getenv("JWT-SECRET"), os.Getenv("JWT-ISSUER"))
+	jwtService := jwt.NewJWTService(os.Getenv("JWT-SECRET"), os.Getenv("JWT-ISSUER"))
 
 	// ===== Repository =====
 	exampleRepository := example.NewExampleRepository(db)
 	userRepository := user.NewUserRepository(db)
+	tokenRepository := token.NewUserRepository(db)
 
 	// ===== Service =====
 	exampleService := example.NewExampleService(exampleRepository)
-	authService := auth.NewAuthService(userRepository, userIdentity)
+	authService := auth.NewAuthService(userRepository, tokenRepository, jwtService, db)
 
 	// ===== Controller =====
 	exampleController := example.NewExampleController(exampleService)

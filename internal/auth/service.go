@@ -8,10 +8,12 @@ import (
 	"template-golang-2025/internal/dto"
 	"template-golang-2025/internal/entity"
 	"template-golang-2025/internal/pkg/serverutils"
+	token "template-golang-2025/internal/refresh-token"
 	user "template-golang-2025/internal/users"
 	"template-golang-2025/pkg/jwt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -20,13 +22,19 @@ type IAuthService interface {
 	Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error)
 }
 
-type authService struct {
-	usersRepository user.IUserRepository
-	jwtService      jwt.JWTService
+type DBTransactioner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-func NewAuthService(usersRepository user.IUserRepository, jwtService jwt.JWTService) IAuthService {
-	return &authService{usersRepository: usersRepository, jwtService: jwtService}
+type authService struct {
+	usersRepository user.IUserRepository
+	tokenRepository token.IRefreshTokenRepository
+	jwtService      jwt.JWTService
+	db              DBTransactioner
+}
+
+func NewAuthService(usersRepository user.IUserRepository, tokenRepository token.IRefreshTokenRepository, jwtService jwt.JWTService, db DBTransactioner) IAuthService {
+	return &authService{usersRepository: usersRepository, tokenRepository: tokenRepository, jwtService: jwtService, db: db}
 }
 
 func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*dto.RegisterResponse, error) {
@@ -65,12 +73,45 @@ func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*
 	defaultRoles := []string{constant.USER}
 	defaultPerm := []string{""}
 
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer tx.Rollback(ctx)
+
+	tokenRepository := s.tokenRepository.UsingTx(ctx, tx)
+
 	// 5. Generate Tokens (Kirim data lengkap: ID, Name, Email, Roles)
 	accessToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, defaultRoles, defaultPerm, "access")
 	if err != nil {
 		return nil, err
 	}
 	refreshToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, defaultRoles, defaultPerm, "refresh")
+	if err != nil {
+		return nil, err
+	}
+
+	err = tokenRepository.DeleteRefreshTokenByUserId(ctx, user.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenRefresh := &entity.RefereshTokens{
+		Id:        uuid.New(),
+		UserId:    &user.Id,
+		Token:     refreshToken,
+		ExpiredAt: nil,
+		RevokedAt: nil,
+		CreatedAt: time.Now(),
+	}
+
+	err = tokenRepository.CreateRefreshToken(ctx, tokenRefresh)
+	if err != nil {
+		return nil, err
+	}
+
+	err = tx.Commit(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -84,36 +125,31 @@ func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*
 		Token: dto.Token{
 			AccessToken:  accessToken,
 			RefreshToken: refreshToken,
-			ExpiresIn:    900, // 15 menit
+			ExpiresIn:    900,
 		},
 	}, nil
 }
 
 func (s *authService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error) {
-	// 1. Cari User berdasarkan Email
 	user, err := s.usersRepository.FindUserByEmail(ctx, req.Email)
 	if err != nil {
 		return nil, err
 	}
 
-	// Keamanan: Jika user tidak ada, gunakan error generic "Invalid Credentials"
 	if user == nil {
 		return nil, serverutils.ErrInvalidCredentials
 	}
 
-	// 2. Verifikasi Password
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
 		return nil, serverutils.ErrInvalidCredentials
 	}
 
-	// 3. Ambil Roles & Permissions dari DB (Sesuai method baru kita di repository)
 	roles, permissions, err := s.usersRepository.GetUserRolesAndPermissions(ctx, user.Id)
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Generate Tokens dengan data asli dari Database
 	accessToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, roles, permissions, "access")
 	if err != nil {
 		return nil, err
@@ -123,7 +159,39 @@ func (s *authService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 		return nil, err
 	}
 
-	// 5. Response (Gunakan dto.LoginResponse)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer tx.Rollback(ctx)
+
+	tokenRepository := s.tokenRepository.UsingTx(ctx, tx)
+
+	err = tokenRepository.DeleteRefreshTokenByUserId(ctx, user.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenRefresh := &entity.RefereshTokens{
+		Id:        uuid.New(),
+		UserId:    &user.Id,
+		Token:     refreshToken,
+		ExpiredAt: nil,
+		RevokedAt: nil,
+		CreatedAt: time.Now(),
+	}
+
+	err = tokenRepository.CreateRefreshToken(ctx, tokenRefresh)
+	if err != nil {
+		return nil, err
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	return &dto.LoginResponse{
 		User: dto.UserIdentity{
 			Id:    user.Id,
