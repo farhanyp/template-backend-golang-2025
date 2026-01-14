@@ -15,6 +15,7 @@ type IRefreshTokenRepository interface {
 	UsingTx(ctx context.Context, tx database.DatabaseQueryer) IRefreshTokenRepository
 	CreateRefreshToken(ctx context.Context, token *entity.RefereshTokens) error
 	DeleteRefreshTokenByUserId(ctx context.Context, userID uuid.UUID) error
+	RevokeRefreshToken(ctx context.Context, userID uuid.UUID) error
 }
 
 type refreshTokenRepository struct {
@@ -76,6 +77,30 @@ func (r *refreshTokenRepository) DeleteRefreshTokenByUserId(ctx context.Context,
 	// Biasanya untuk Delete by User ID, jika tidak ada data yang dihapus (0 rows)
 	// tidak dianggap error, karena mungkin user memang belum punya token.
 	_ = tag.RowsAffected()
+
+	return nil
+}
+
+func (r *refreshTokenRepository) RevokeRefreshToken(ctx context.Context, userID uuid.UUID) error {
+	// Menghapus data token secara permanen dari database
+	query := `DELETE FROM refresh_tokens WHERE user_id = $1`
+
+	tag, err := r.db.Exec(
+		ctx,
+		query,
+		userID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to delete refresh token: %w", err)
+	}
+
+	// Tag.RowsAffected() memberitahu kita berapa banyak baris yang dihapus.
+	// Jika 0, berarti user memang tidak memiliki session aktif.
+	if tag.RowsAffected() == 0 {
+		// Ini opsional, bisa dianggap sukses atau error tergantung kebutuhan bisnis Anda
+		return fmt.Errorf("no active session found for this user")
+	}
 
 	return nil
 }

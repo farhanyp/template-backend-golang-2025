@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -259,13 +260,29 @@ func (s *authService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 }
 
 func (s *authService) Logout(ctx context.Context, req *dto.LogoutRequest) error {
+	// 1. Validasi token (hanya perlu panggil sekali)
+	token, err := s.jwtService.ValidateToken(req.RefreshToken)
+	if err != nil || !token.Valid {
+		return errors.New("invalid or expired refresh token")
+	}
 
-	user, err := s.jwtService.ValidateToken(req.RefreshToken)
+	// 2. Ambil claims untuk mendapatkan UserID dan Tipe Token
+	claims, err := s.jwtService.GetClaims(token)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("User JWT: %s", user)
+	// 3. Keamanan Tambahan: Pastikan yang mau di-logout memang Refresh Token
+	if claims.Type != "refresh" {
+		return errors.New("invalid token type for logout")
+	}
+
+	// 4. Panggil repository untuk menghapus data (Hard Delete)
+	// Kirim claims.UserID (uuid.UUID) sesuai permintaan fungsi repository sebelumnya
+	err = s.tokenRepository.RevokeRefreshToken(ctx, claims.UserID)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

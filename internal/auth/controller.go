@@ -89,13 +89,6 @@ func (c *authController) Logout(ctx *gin.Context) {
 
 	req.RefreshToken = refreshToken
 
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
 	if err := serverutils.ValidateRequest(req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
@@ -105,7 +98,7 @@ func (c *authController) Logout(ctx *gin.Context) {
 
 	err := c.service.Logout(ctx.Request.Context(), &req)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(serverutils.ErrInvalidRefreshToken)
 		return
 	}
 

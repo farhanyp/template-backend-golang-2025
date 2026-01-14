@@ -46,6 +46,14 @@ func ErrorHandlerMiddlewareGin() gin.HandlerFunc {
 			return
 		}
 
+		if errors.Is(err, ErrInvalidRefreshToken) {
+			c.AbortWithStatusJSON(
+				http.StatusBadRequest,
+				ErrorResponse(http.StatusBadRequest, err.Error()),
+			)
+			return
+		}
+
 		if errors.Is(err, ErrEmailAlreadyExists) {
 			c.AbortWithStatusJSON(
 				http.StatusBadRequest,
