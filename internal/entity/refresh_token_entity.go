@@ -8,7 +8,7 @@ import (
 
 type RefereshTokens struct {
 	Id        uuid.UUID
-	UserId    *uuid.UUID
+	UserId    uuid.UUID
 	Token     string
 	ExpiredAt *time.Time
 	RevokedAt *time.Time

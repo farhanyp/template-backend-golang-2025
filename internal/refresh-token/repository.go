@@ -35,7 +35,7 @@ func (r *refreshTokenRepository) UsingTx(ctx context.Context, tx database.Databa
 
 func (r *refreshTokenRepository) CreateRefreshToken(ctx context.Context, token *entity.RefereshTokens) error {
 	query := `
-        INSERT INTO users (id, user_id, token, expired_at, revoked_at, created_at)
+        INSERT INTO refresh_tokens (id, user_id, token, expired_at, revoked_at, created_at)
         VALUES ($1, $2, $3, $4, $5, $6)
     `
 

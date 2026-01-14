@@ -12,6 +12,7 @@ type IAuthController interface {
 	RegisterRoutes(r *gin.RouterGroup)
 	Register(ctx *gin.Context)
 	Login(ctx *gin.Context)
+	Logout(ctx *gin.Context)
 }
 
 type authController struct {
@@ -26,6 +27,7 @@ func (c *authController) RegisterRoutes(r *gin.RouterGroup) {
 	h := r.Group("/v1/auth")
 	h.POST("/register", c.Register)
 	h.POST("/login", c.Login)
+	h.POST("/logout", c.Logout)
 }
 
 func (c *authController) Register(ctx *gin.Context) {
@@ -77,5 +79,35 @@ func (c *authController) Login(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, serverutils.SuccessResponse("Success Registration", res))
+	ctx.JSON(http.StatusOK, serverutils.SuccessResponse("Success Login", res))
+}
+
+func (c *authController) Logout(ctx *gin.Context) {
+
+	var req dto.LogoutRequest
+	refreshToken := ctx.GetHeader("X-Refresh-Token")
+
+	req.RefreshToken = refreshToken
+
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	if err := serverutils.ValidateRequest(req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	err := c.service.Logout(ctx.Request.Context(), &req)
+	if err != nil {
+		ctx.Error(err)
+		return
+	}
+
+	ctx.JSON(http.StatusOK, serverutils.SuccessResponse[any]("Success Logout", nil))
 }

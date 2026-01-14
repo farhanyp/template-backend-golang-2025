@@ -11,6 +11,9 @@ import (
 type JWTService interface {
 	GenerateToken(userID uuid.UUID, nameUser string, emailUser string, roles []string, permissions []string, tokenType string) (string, error)
 	ValidateToken(tokenString string) (*jwt.Token, error)
+	GetClaims(token *jwt.Token) (*JWTCustomClaims, error)
+	GetAccessExpiry() time.Duration
+	GetRefreshExpiry() time.Duration
 }
 
 type jwtService struct {
@@ -71,4 +74,20 @@ func (s *jwtService) ValidateToken(tokenString string) (*jwt.Token, error) {
 		}
 		return []byte(s.secretKey), nil
 	})
+}
+
+func (s *jwtService) GetClaims(token *jwt.Token) (*JWTCustomClaims, error) {
+	claims, ok := token.Claims.(*JWTCustomClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid token claims")
+	}
+	return claims, nil
+}
+
+func (s *jwtService) GetAccessExpiry() time.Duration {
+	return s.accessExpiry
+}
+
+func (s *jwtService) GetRefreshExpiry() time.Duration {
+	return s.refreshExpiry
 }

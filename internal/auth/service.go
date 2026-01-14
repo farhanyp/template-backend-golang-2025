@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"template-golang-2025/internal/constant"
@@ -20,6 +21,7 @@ import (
 type IAuthService interface {
 	Register(ctx context.Context, req *dto.RegisterRequest) (*dto.RegisterResponse, error)
 	Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error)
+	Logout(ctx context.Context, req *dto.LogoutRequest) error
 }
 
 type DBTransactioner interface {
@@ -38,22 +40,41 @@ func NewAuthService(usersRepository user.IUserRepository, tokenRepository token.
 }
 
 func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*dto.RegisterResponse, error) {
-	// 1. Cek User Exist
+	// 1. Validasi awal (diluar transaksi untuk menghemat resource)
 	existingUser, err := s.usersRepository.FindUserByEmail(ctx, req.Email)
 	if err != nil {
-		return nil, err
+		log.Printf("[Register] DB Error checking email %s: %v", req.Email, err)
+		return nil, serverutils.ErrInternalServer
 	}
 	if existingUser != nil {
 		return nil, serverutils.ErrEmailAlreadyExists
 	}
 
-	// 2. Hash Password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	existingRole, err := s.usersRepository.GetRole(ctx, "user")
 	if err != nil {
-		return nil, err
+		log.Printf("[Register] Role 'user' not found in DB: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 
-	// 3. Simpan User
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("[Register] Failed to hash password: %v", err)
+		return nil, serverutils.ErrInternalServer
+	}
+
+	// 2. Mulai Transaksi Tunggal
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		log.Printf("[Register] Transaction Begin Error: %v", err)
+		return nil, serverutils.ErrInternalServer
+	}
+	// Pastikan rollback jika terjadi error atau panic
+	defer tx.Rollback(ctx)
+
+	// Gunakan repository yang sudah dibungkus transaksi
+	userRepoTx := s.usersRepository.UsingTx(ctx, tx)
+	tokenRepoTx := s.tokenRepository.UsingTx(ctx, tx)
+
 	now := time.Now()
 	user := &entity.Users{
 		Id:         uuid.New(),
@@ -65,55 +86,63 @@ func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*
 		UpdatedAt:  &now,
 	}
 
-	err = s.usersRepository.CreateUser(ctx, user)
-	if err != nil {
-		return nil, err
+	// SIMPAN USER (Gunakan userRepoTx)
+	if err := userRepoTx.CreateUser(ctx, user); err != nil {
+		log.Printf("[Register] Failed to create user entity: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 
+	userRoles := &entity.UserRoles{
+		Id:        uuid.New(),
+		UserId:    user.Id,
+		RoleId:    existingRole.Id,
+		CreatedAt: now,
+		UpdatedAt: &now,
+	}
+
+	// SIMPAN ROLE (Gunakan userRepoTx)
+	if err := userRepoTx.CreateUserRole(ctx, userRoles); err != nil {
+		log.Printf("[Register] Failed to assign role to user %s: %v", user.Id, err)
+		return nil, serverutils.ErrInternalServer
+	}
+
+	// 3. Generate Token
 	defaultRoles := []string{constant.USER}
 	defaultPerm := []string{""}
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	defer tx.Rollback(ctx)
-
-	tokenRepository := s.tokenRepository.UsingTx(ctx, tx)
-
-	// 5. Generate Tokens (Kirim data lengkap: ID, Name, Email, Roles)
 	accessToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, defaultRoles, defaultPerm, "access")
 	if err != nil {
-		return nil, err
+		log.Printf("[Register] Failed to create access token: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 	refreshToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, defaultRoles, defaultPerm, "refresh")
 	if err != nil {
-		return nil, err
+		log.Printf("[Register] Failed to create refresh token: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 
-	err = tokenRepository.DeleteRefreshTokenByUserId(ctx, user.Id)
-	if err != nil {
-		return nil, err
-	}
+	refreshDuration := s.jwtService.GetRefreshExpiry()
+	expiredAt := now.Add(refreshDuration)
 
+	// SIMPAN REFRESH TOKEN (Gunakan tokenRepoTx)
 	tokenRefresh := &entity.RefereshTokens{
 		Id:        uuid.New(),
-		UserId:    &user.Id,
+		UserId:    user.Id,
 		Token:     refreshToken,
-		ExpiredAt: nil,
-		RevokedAt: nil,
-		CreatedAt: time.Now(),
+		ExpiredAt: &expiredAt, // Menggunakan pointer ke time.Time
+		RevokedAt: nil,        // Nil karena token baru aktif dan belum dicabut
+		CreatedAt: now,
 	}
 
-	err = tokenRepository.CreateRefreshToken(ctx, tokenRefresh)
-	if err != nil {
-		return nil, err
+	if err := tokenRepoTx.CreateRefreshToken(ctx, tokenRefresh); err != nil {
+		log.Printf("[Auth] Failed to insert refresh token to db: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 
-	err = tx.Commit(ctx)
-	if err != nil {
-		return nil, err
+	// 4. Commit Transaksi
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[Register] Transaction Commit Error: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
 
 	return &dto.RegisterResponse{
@@ -131,66 +160,89 @@ func (s *authService) Register(ctx context.Context, req *dto.RegisterRequest) (*
 }
 
 func (s *authService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error) {
+	// 1. Cari User berdasarkan Email
 	user, err := s.usersRepository.FindUserByEmail(ctx, req.Email)
 	if err != nil {
-		return nil, err
+		log.Printf("[Login] Database error for email %s: %v", req.Email, err)
+		return nil, serverutils.ErrInternalServer
 	}
 
+	// 2. Validasi Keberadaan User & Password (Security Best Practice: Error yang sama)
 	if user == nil {
+		log.Printf("[Login] User not found: %s", req.Email)
 		return nil, serverutils.ErrInvalidCredentials
 	}
 
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
+		log.Printf("[Login] Invalid password attempt for email: %s", req.Email)
 		return nil, serverutils.ErrInvalidCredentials
 	}
 
+	// 3. Ambil Roles dan Permissions
 	roles, permissions, err := s.usersRepository.GetUserRolesAndPermissions(ctx, user.Id)
 	if err != nil {
-		return nil, err
+		log.Printf("[Login] Failed to fetch roles/perms for user %s: %v", user.Id, err)
+		return nil, serverutils.ErrInternalServer
 	}
 
+	// 4. Generate Token (diluar transaksi untuk efisiensi)
 	accessToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, roles, permissions, "access")
 	if err != nil {
+		log.Printf("[Login] Error generating access token for user %s: %v", user.Id, err)
 		return nil, err
 	}
+
 	refreshToken, err := s.jwtService.GenerateToken(user.Id, user.Name, user.Email, roles, permissions, "refresh")
 	if err != nil {
+		log.Printf("[Login] Error generating refresh token for user %s: %v", user.Id, err)
 		return nil, err
 	}
 
+	// 5. Mulai Transaksi Database
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return nil, err
+		log.Printf("[Login] Failed to start transaction: %v", err)
+		return nil, serverutils.ErrInternalServer
 	}
-
 	defer tx.Rollback(ctx)
 
-	tokenRepository := s.tokenRepository.UsingTx(ctx, tx)
+	tokenRepoTx := s.tokenRepository.UsingTx(ctx, tx)
 
-	err = tokenRepository.DeleteRefreshTokenByUserId(ctx, user.Id)
-	if err != nil {
-		return nil, err
+	// 6. Kelola Refresh Token (Hapus yang lama, simpan yang baru)
+	if err := tokenRepoTx.DeleteRefreshTokenByUserId(ctx, user.Id); err != nil {
+		log.Printf("[Login] Failed to delete old refresh tokens for user %s: %v", user.Id, err)
+		return nil, serverutils.ErrInternalServer
 	}
+
+	now := time.Now()
+	// Ambil durasi expiry dari service agar sinkron
+	refreshExpiryDuration := s.jwtService.GetRefreshExpiry()
+	expiredAt := now.Add(refreshExpiryDuration)
 
 	tokenRefresh := &entity.RefereshTokens{
 		Id:        uuid.New(),
-		UserId:    &user.Id,
+		UserId:    user.Id,
 		Token:     refreshToken,
-		ExpiredAt: nil,
+		ExpiredAt: &expiredAt, // Sekarang sudah terisi
 		RevokedAt: nil,
-		CreatedAt: time.Now(),
+		CreatedAt: now,
 	}
 
-	err = tokenRepository.CreateRefreshToken(ctx, tokenRefresh)
-	if err != nil {
-		return nil, err
+	log.Printf("Refresh Token: %v", tokenRefresh)
+
+	if err := tokenRepoTx.CreateRefreshToken(ctx, tokenRefresh); err != nil {
+		log.Printf("[Login] Failed to save new refresh token for user %s: %v", user.Id, err)
+		return nil, serverutils.ErrInternalServer
 	}
 
-	err = tx.Commit(ctx)
-	if err != nil {
-		return nil, err
+	// 7. Commit Transaksi
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[Login] Failed to commit transaction for user %s: %v", user.Id, err)
+		return nil, serverutils.ErrInternalServer
 	}
+
+	log.Printf("[Login] Success: User %s logged in", user.Email)
 
 	return &dto.LoginResponse{
 		User: dto.UserIdentity{
@@ -204,4 +256,16 @@ func (s *authService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 			ExpiresIn:    900,
 		},
 	}, nil
+}
+
+func (s *authService) Logout(ctx context.Context, req *dto.LogoutRequest) error {
+
+	user, err := s.jwtService.ValidateToken(req.RefreshToken)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("User JWT: %s", user)
+
+	return nil
 }

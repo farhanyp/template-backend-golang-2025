@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type Role struct {
+type Permissions struct {
 	Id          uuid.UUID
 	Code        string
 	Description string
